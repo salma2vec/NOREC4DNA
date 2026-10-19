@@ -272,17 +272,12 @@ class OnlineBPDecoder(BPDecoder):
                 total_number_of_chunks=self.number_of_chunks,
             )  # , numberOfAuxPackets=self.getNumberOfAuxBlocks()) # We will add the Data once we have it.
 
-    def solve(self):
+    def solve(self, partial: bool = False) -> bool:
+        # Peeling and inactivation decoding (shared BPDecoder code).
+        res = super().solve(partial=partial)
         if self.use_headerchunk and self.headerChunk is None:
             self.decodeHeader()
-        # Decoder.solve(self)
-        super(OnlineBPDecoder, self).solve()
-
-    def is_decoded(self) -> bool:
-        return self.getSolvedCount() >= self.number_of_chunks
-
-    def getSolvedCount(self) -> int:
-        return len(self.decodedPackets) + (1 if self.headerChunk is not None else 0)
+        return res
 
     def getNextValidPacket(
         self,
@@ -376,12 +371,11 @@ class OnlineBPDecoder(BPDecoder):
         return res
 
     def decodeHeader(self, last_chunk_len_format: str = "I") -> None:
-        if self.headerChunk is not None or 1 not in self.degreeToPacket.keys():
-            return  # Header already set or no chunks decoded so far
-        for decoded in self.degreeToPacket[1]:
-            if decoded.get_used_packets().issubset({0}):
-                self.headerChunk = HeaderChunk(decoded, last_chunk_len_format=last_chunk_len_format)
-                return
+        if self.headerChunk is not None or 0 not in self.solved_symbols:
+            return  # Header already set or not decoded so far
+        self.headerChunk = HeaderChunk(
+            self.solved_symbols[0], last_chunk_len_format=last_chunk_len_format
+        )
 
     def saveDecodedFile(
         self, null_is_terminator: bool = False, print_to_output: bool = True
@@ -403,7 +397,7 @@ class OnlineBPDecoder(BPDecoder):
             )
         with open(file_name, "wb") as f:
             a = []
-            for decoded in sorted(self.decodedPackets):
+            for decoded in self.solved_packets_in_order():
                 [num] = decoded.get_used_packets()
                 if 0 != num or not self.use_headerchunk or self.number_of_chunks - 1 == 0:
                     if isinstance(decoded, OnlineAuxPacket):

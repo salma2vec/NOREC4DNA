@@ -64,4 +64,5 @@ class DecodePacket(Packet):
     def xor_and_remove_packet(self, packet: Packet):
         self.remove_packets(packet.get_used_packets())
         self.data = xor_numpy(self.data, packet.get_data())
+        self.provenance = getattr(self, "provenance", 0) ^ getattr(packet, "provenance", 0)
         self.did_change = True  # CRC is no longer valid

@@ -164,13 +164,23 @@ class Encoder(ABC):
             dtype=np.uint8,
         )
 
-    def fill_last_chunk(self, force_fill_zero: bool = False) -> None:
+    def fill_last_chunk(
+        self,
+        force_fill_zero: bool = False,
+        random_state: typing.Optional[np.random.RandomState] = None,
+    ) -> None:
+        # random padding comes from os.urandom unless a (seeded) random_state is given
         last = self.chunks[-1]
         assert len(last) <= self.chunk_size, "Error, last Chunk ist bigger than ChunkSize"
         if len(last) < self.chunk_size:
             if self.insert_header and not force_fill_zero:
                 # only add random bytes if xor_by_seed is False (otherwise packet will be scrambled by xor)
-                filler = b"\x00" + os.urandom(self.chunk_size - len(last) - 1)
+                n_random = self.chunk_size - len(last) - 1
+                filler = b"\x00" + (
+                    random_state.bytes(n_random)
+                    if random_state is not None
+                    else os.urandom(n_random)
+                )
             else:
                 filler = (self.chunk_size - len(last)) * b"\x00"
             struct_str = "<" + str(len(last)) + "s" + str(self.chunk_size - len(last)) + "s"

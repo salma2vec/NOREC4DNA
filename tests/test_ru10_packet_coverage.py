@@ -136,11 +136,13 @@ class TestRU10PacketMethods:
         assert size < packet_with.get_packet_header_size()
 
     def test_set_used_packets_empty(self):
-        """Test set_used_packets with empty list"""
+        """An empty used set is valid (a fully reduced packet during BP peeling)."""
         packet = RU10Packet(b"test", [0, 1], 100, 1)
         with patch("logging.warning") as mock_warning:
             packet.set_used_packets([])
-            mock_warning.assert_called_once()
+            mock_warning.assert_not_called()  # happens on every full reduction: no warning
+        assert packet.get_degree() == 0
+        assert not any(packet.get_bool_array_used_packets())
 
     def test_set_used_packets_with_invalid_indices(self):
         """Test set_used_packets filters out invalid indices"""
@@ -225,12 +227,12 @@ class TestRU10PacketMethods:
         assert not arr[2]
 
     def test_get_bool_array_used_packets_none(self):
-        """Test get_bool_array_used_packets when bool_arrayused_packets is None"""
+        """The bool array is computed lazily when the cache is empty."""
         packet = RU10Packet(b"test", [0, 1], 100, 1, read_only=True)
-        # Force bool_arrayused_packets to None
-        packet.bool_arrayused_packets = None
+        packet.bool_arrayused_packets = None  # cache cleared, as set_used_packets does
         arr = packet.get_bool_array_used_packets()
-        assert arr is None
+        assert arr is not None and len(arr) == 100
+        assert arr[0] and arr[1] and not any(arr[2:])
 
     def test_get_bool_array_all_used_packets(self):
         """Test get_bool_array_all_used_packets"""

@@ -41,8 +41,6 @@ class LTBPDecoder(BPDecoder):
         self.implicit_mode: bool = implicit_mode
         self.use_headerchunk: bool = use_headerchunk
         self.file: typing.Optional[str] = file
-        self.decodedPackets: typing.Dict[int, Packet] = {}
-        self.degreeToPacket: typing.Dict[int, typing.Set[Packet]] = {}
         if file is not None:
             self.isFolder: bool = os.path.isdir(file)
             if not self.isFolder:
@@ -57,16 +55,6 @@ class LTBPDecoder(BPDecoder):
         self.dist: typing.Optional[Distribution] = (
             dist  # if implicit_mode is True, dist MUST be != None
         )
-
-    def _store_decoded_packet(self, packet: Packet) -> None:
-        if packet.get_degree() != 1:
-            return
-        [chunk_index] = packet.get_used_packets()
-        if chunk_index == 0 and self.use_headerchunk:
-            if self.headerChunk is None:
-                self.headerChunk = HeaderChunk(packet)
-            return
-        self.decodedPackets[chunk_index] = packet
 
     def _update_decode_formats(
         self, number_of_chunks_len_format: str, degree_len_format: str
@@ -109,15 +97,19 @@ class LTBPDecoder(BPDecoder):
         return new_pack is not None and self.input_new_packet(new_pack)
 
     def _get_sorted_packets(self) -> typing.List[Packet]:
-        return [self.decodedPackets[chunk_index] for chunk_index in sorted(self.decodedPackets)]
+        """Return the solved data chunks (without the header chunk), ordered by id."""
+        return [
+            packet
+            for packet in self.solved_packets_in_order()
+            if not (self.use_headerchunk and packet.get_used_packets() == {0})
+        ]
 
     def _ensure_header_chunk(self, last_chunk_len_format: str) -> None:
-        if not self.use_headerchunk or self.headerChunk is not None:
-            return
-        for packet in self.degreeToPacket.get(1, set()):
-            if packet.get_used_packets() == {0}:
-                self.headerChunk = HeaderChunk(packet, last_chunk_len_format=last_chunk_len_format)
-                break
+        """(Re-)read the header chunk with the requested format of the last-chunk length."""
+        if self.use_headerchunk and 0 in self.solved_symbols:
+            self.headerChunk = HeaderChunk(
+                self.solved_symbols[0], last_chunk_len_format=last_chunk_len_format
+            )
 
     def _default_output_file_name(self) -> str:
         assert self.file is not None, "Cannot save file: file is None"
@@ -321,100 +313,17 @@ class LTBPDecoder(BPDecoder):
         raise RuntimeError("Not implemented for BP-based decoders in the current version!")
 
     def input_new_packet(self, packet: Packet) -> bool:
-        """Used for easy PseudoDecode"""
+        """Add a packet and peel (shared BPDecoder code); the caller's packet is not changed."""
         if not isinstance(packet, DecodePacket):
-            decode_packet: Packet = DecodePacket.from_packet(packet)
-            self.addPacket(decode_packet)
-            return self.updatePackets(decode_packet)
+            packet = DecodePacket.from_packet(packet)
         self.addPacket(packet)
         return self.updatePackets(packet)
-
-    def addPacket(self, packet: Packet) -> None:
-        if (packet.get_degree() not in self.degreeToPacket) or (
-            not isinstance(self.degreeToPacket[packet.get_degree()], set)
-        ):
-            self.degreeToPacket[packet.get_degree()] = set()
-        self.number_of_chunks = packet.get_total_number_of_chunks()
-        self.degreeToPacket[packet.get_degree()].add(packet)
-
-    def updatePackets(self, packet: Packet) -> bool:
-        if packet.get_degree() == 1:
-            self._store_decoded_packet(packet)
-            if self.is_decoded():
-                return True
-        self.queue.append(packet)
-        finished: bool = False
-        while len(self.queue) > 0 and not finished:
-            finished = self.reduceAll(self.queue.popleft())
-        return finished
-
-    def compareAndReduce(self, packet: Packet, other: Packet) -> typing.Union[bool, int]:
-        if self.file is None:  # In case of PseudoDecode: DO NOT REALLY COMPUTE XOR
-            packet.remove_packets(other.get_used_packets())
-        else:
-            packet.xor_and_remove_packet(other)
-        degree = packet.get_degree()
-        if (degree not in self.degreeToPacket) or (
-            not isinstance(self.degreeToPacket[degree], set)
-        ):
-            self.degreeToPacket[degree] = set()
-        if degree == 1:
-            self._store_decoded_packet(packet)
-        self.degreeToPacket[degree].add(packet)
-        if self.is_decoded():
-            return True
-        self.queue.append(packet)
-        return degree
-
-    """def reduceAll(self, packet: Packet) -> bool:
-        # looup all packets for this to solve with ( when this packet has a subset of used Packets)
-        fin: bool = False
-
-        lookup: typing.List[int] = [i for i in self.degreeToPacket.keys() if packet.get_degree() < i]
-        for i in lookup:
-            if not isinstance(self.degreeToPacket[i], set):
-                self.degreeToPacket[i] = set()
-            for p in self.degreeToPacket[i].copy():
-                p_used = p.get_used_packets()
-                pack_used = packet.get_used_packets()
-                if len(pack_used) < len(p_used) and pack_used.issubset(p_used):
-                    self.degreeToPacket[i].remove(p)
-                    degree = self.compareAndReduce(p, packet)
-                    if isinstance(degree, bool) and degree:
-                        return degree
-        degree = packet.get_degree()
-        lookup = [i for i in self.degreeToPacket.keys() if packet.get_degree() > i]
-        for i in lookup:
-            if not isinstance(self.degreeToPacket[i], set):
-                self.degreeToPacket[i] = set()
-            for p in self.degreeToPacket[i].copy():
-                p_used = p.get_used_packets()
-                pack_used = packet.get_used_packets()
-                if len(pack_used) > len(p_used) and p_used.issubset(pack_used):
-                    try:
-                        self.degreeToPacket[degree].remove(packet)
-                        degree = self.compareAndReduce(packet, p)
-                        if isinstance(degree, bool) and degree:
-                            return degree
-                    except Exception:
-                        continue
-        return fin or self.is_decoded()"""
-
-    def is_decoded(self) -> bool:
-        solved_chunks = len(self.decodedPackets)
-        required_chunks = self.number_of_chunks - (1 if self.use_headerchunk else 0)
-        if solved_chunks < required_chunks:
-            return False
-        return not self.use_headerchunk or self.headerChunk is not None
 
     def removeAndXorAuxPackets(
         self, packet: typing.Union[Packet, "OnlinePacket", "RU10Packet"]
     ) -> typing.List[bool]:
-        """Override parent class method - LTBPDecoder doesn't use aux packets"""
-        return []
-
-    def getSolvedCount(self) -> int:
-        return len(self.decodedPackets) + (1 if self.headerChunk is not None else 0)
+        """LT codes have no auxiliary packets: a packet already lists its source chunks."""
+        return list(packet.get_bool_array_used_packets())
 
     def getNextValidPacket(
         self,
@@ -531,7 +440,7 @@ if __name__ == "__main__":
         "LT_Approx_Decode,"
         + str(x.number_of_chunks)
         + ","
-        + str(len(x.decodedPackets))
+        + str(x.getSolvedCount())
         + ","
         + str(p_end)
         + ","

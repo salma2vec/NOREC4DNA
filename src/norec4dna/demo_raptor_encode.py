@@ -42,6 +42,8 @@ class demo_raptor_encode:
         mask_id=True,
         id_spacing=0,
         forbidden_sequences=None,
+        zero_padding=False,
+        seed=None,
     ):
         number_of_chunks = Encoder.get_number_of_chunks_for_file_with_chunk_size(file, chunk_size)
         dist = RaptorDistribution(number_of_chunks)
@@ -73,6 +75,8 @@ class demo_raptor_encode:
             xor_by_seed=xor_by_seed,
             mask_id=mask_id,
             id_spacing=id_spacing,
+            zero_padding=zero_padding,
+            seed=seed,
         )
         x.set_overhead_limit(overhead)
         x.encode_to_packets()

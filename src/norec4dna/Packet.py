@@ -83,6 +83,9 @@ class Packet:
         append: str = "",
     ):
         self.data: Union[bytes, UInt8Array] = data
+        # Bit set of the received packets XORed into this packet while decoding
+        # (bit p = p-th received packet); set and maintained by the BP decoders.
+        self.provenance: int = 0
         self.error_correction: ErrorCorrectionCallable = error_correction
         self.total_number_of_chunks: int = total_number_of_chunks
         self.used_packets: Set[int] = set()
@@ -255,6 +258,7 @@ class Packet:
     def xor_and_remove_packet(self, packet: "Packet") -> None:
         self.remove_packets(packet.get_used_packets())
         self.data = xor_numpy(self.data, packet.get_data())
+        self.provenance = getattr(self, "provenance", 0) ^ getattr(packet, "provenance", 0)
         self.did_change = True  # CRC is no longer valid
 
     def set_error_prob(self, error_prob: Optional[int] = None) -> None:

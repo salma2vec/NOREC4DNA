@@ -50,6 +50,8 @@ class RU10Encoder(Encoder):
         id_spacing=0,
         last_chunk_len_format="H",
         repair_symbols: int = 2,
+        zero_padding: bool = False,
+        seed: typing.Optional[int] = None,
     ):
         super().__init__(
             file,
@@ -80,6 +82,9 @@ class RU10Encoder(Encoder):
         self.mode_1_bmp: bool = mode_1_bmp
         self.upper_bound = drop_upper_bound
         self.xor_by_seed = xor_by_seed
+        # pad the last chunk with zero bytes instead of random bytes (always done
+        # with xor_by_seed, since the xor stream already scrambles the padding)
+        self.zero_padding: bool = zero_padding or xor_by_seed
         self.mask_id = mask_id
         self.repair_symbols: int = repair_symbols
         if self.chunk_size == 0:
@@ -102,7 +107,9 @@ class RU10Encoder(Encoder):
         self.save_number_of_chunks_in_packet: bool = save_number_of_chunks_in_packet
         # if we use None, we will mutate the RNG each call,
         # otherwise we will use the same RNG to generate different values
-        self.random_state: np.random.RandomState = np.random.RandomState()
+        # an optional seed makes the encoding reproducible (packet seeds and padding)
+        self.seed: typing.Optional[int] = seed
+        self.random_state: np.random.RandomState = np.random.RandomState(seed)
         state = typing.cast(
             typing.Tuple[typing.Any, np.ndarray, int, int, float], self.random_state.get_state()
         )
@@ -142,7 +149,10 @@ class RU10Encoder(Encoder):
         else:
             self.chunk_size = ceil(1.0 * file_size / self.number_of_chunks)
             self.chunks = self.create_chunks(self.chunk_size)
-        self.fill_last_chunk(force_fill_zero=self.xor_by_seed)
+        self.fill_last_chunk(
+            force_fill_zero=self.zero_padding,
+            random_state=self.random_state if self.seed is not None else None,
+        )
         # create Intermediate Blocks and save them as self.chunks
         self.generate_intermediate_blocks()
 
@@ -517,6 +527,7 @@ class RU10Encoder(Encoder):
                 "checksum_len_str": self.checksum_len_str,
                 "mask_id": self.mask_id,
                 "xor_by_seed": self.xor_by_seed,
+                "zero_padding": self.zero_padding,
                 "id_spacing": self.id_spacing,
                 "repair_symbols": self.repair_symbols,
             }.items()

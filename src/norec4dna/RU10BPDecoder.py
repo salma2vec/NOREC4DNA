@@ -63,7 +63,6 @@ class RU10BPDecoder(RU10Shared, BPDecoder):
         self.id_spacing = id_spacing
         self.config_map = config_map
         self.GEPP: Optional[GEPP_intern] = None
-        self.packets: List[RU10Packet] = []
         self._gepp_finalized: bool = False
         self.file: Optional[str] = file
         self.use_method: bool = use_method
@@ -488,7 +487,7 @@ class RU10BPDecoder(RU10Shared, BPDecoder):
             if len(packet_data) != expected_len:
                 return False
 
-        self.packets.append(packet)
+        self._register_packet(packet, used_set)
         self._store_removed_packet(used_set, packet)
         return self.updatePackets(packet)
 
@@ -608,87 +607,8 @@ class RU10BPDecoder(RU10Shared, BPDecoder):
                     )
                     self.decodedPackets.add(pkt)
 
-    def _inactivation_solve(self, partial: bool = False) -> None:
-        """Solve symbols the BP peeling could not resolve via a residual GEPP.
-
-        After belief propagation stalls, every received packet has been XOR-
-        reduced: symbols solved during peeling were removed from its
-        ``used_packets`` and XORed out of its data, so each remaining packet
-        references only unsolved symbols and its data is the XOR of exactly
-        those symbols.  Building a GEPP system over the *unsolved columns only*
-        and solving it recovers the remaining chunks (RFC 5053 "inactivation
-        decoding").  Restricting the system to the unsolved symbol set keeps
-        the solve O(r·u²) instead of O(r·K²), which is near-linear whenever
-        peeling resolves the bulk of the pool.
-        """
-        if self.GEPP is None:
-            return
-        unsolved = [
-            i for i in range(self.number_of_chunks) if i not in self.solved_symbols
-        ]
-        if not unsolved:
-            return
-        col_of = {sym: c for c, sym in enumerate(unsolved)}
-
-        # Every received packet (after peeling) is an equation over the
-        # remaining unsolved symbols.  ``symbol_to_packets`` only ever contains
-        # packets that are already in ``self.packets``, so iterating
-        # ``self.packets`` alone covers every equation (no dedup needed).
-        residual_rows: List[np.ndarray] = []
-        residual_data: List[np.ndarray] = []
-        for pkt in self.packets:
-            used = pkt.get_used_packets()
-            if not used:
-                continue
-            cols = [col_of[u] for u in used if u in col_of]
-            if not cols:
-                continue
-            mask = np.zeros(len(unsolved), dtype=bool)
-            mask[cols] = True
-            
-            d_raw = pkt.get_data()
-            if isinstance(d_raw, (bytes, bytearray)):
-                d_arr = np.frombuffer(d_raw, dtype=np.uint8).copy()
-            else:
-                d_arr = np.asarray(d_raw, dtype=np.uint8).copy()
-            # XOR out all symbols that were solved during BP peeling
-            for u in used:
-                if u in self.solved_symbols and u not in col_of:
-                    s_obj = self.solved_symbols[u]
-                    s_data = s_obj.get_data() if hasattr(s_obj, "get_data") else s_obj
-                    if isinstance(s_data, (bytes, bytearray)):
-                        s_arr = np.frombuffer(s_data, dtype=np.uint8)
-                    else:
-                        s_arr = np.asarray(s_data, dtype=np.uint8)
-                    n = min(len(d_arr), len(s_arr))
-                    if n:
-                        d_arr[:n] ^= s_arr[:n]
-            residual_rows.append(mask)
-            residual_data.append(d_arr)
-        if not residual_rows:
-            return
-        rgepp = GEPP(np.array(residual_rows, dtype=bool), np.array(residual_data, dtype=np.uint8))
-        try:
-            rgepp.solve(partial=True)
-        except Exception:
-            return
-        res_map = rgepp.result_mapping
-        for c, sym in enumerate(unsolved):
-            if sym in self.solved_symbols or c >= len(res_map):
-                continue
-            row_idx = int(res_map[c][0]) if getattr(res_map[c], "ndim", 0) > 0 else int(res_map[c])
-            if 0 <= row_idx < len(rgepp.b):
-                data = rgepp.b[row_idx]
-                pkt = RU10Packet(
-                    bytes(data),
-                    {sym},
-                    self.number_of_chunks,
-                    sym,
-                    read_only=True,
-                )
-                self.solved_symbols[sym] = pkt
-                self.decodedPackets.add(pkt)
-                self.queue.append(pkt)
+    def _make_solved_packet(self, data: bytes, symbol: int) -> RU10Packet:
+        return RU10Packet(data, {symbol}, self.number_of_chunks, symbol, read_only=True)
 
     def _materialize_gepp_b(self) -> None:
         """Make ``GEPP.b`` chunk-indexed so the multi-version layer can read it.
@@ -723,7 +643,7 @@ class RU10BPDecoder(RU10Shared, BPDecoder):
         self.GEPP.packet_mapping = np.arange(n, dtype=np.intp)
         self.GEPP.n = n
         self.GEPP.m = n
-        self.GEPP.chunk_to_used_packets = np.identity(n, dtype=bool)
+        self.GEPP.chunk_to_used_packets = self.provenance_matrix()
 
     def _finalize_gepp(self) -> None:
         """Materialise the chunk-indexed GEPP once the solver has finished."""
@@ -740,13 +660,9 @@ class RU10BPDecoder(RU10Shared, BPDecoder):
         return res
 
     def solve(self, partial: bool = False) -> bool:
-        # 1. Peeling (belief propagation): solve as many symbols as possible.
-        self._peel()
-        # 2. Inactivation decoding: GEPP on the residual (unsolved) system.
-        if not self.is_decoded():
-            self._inactivation_solve(partial=partial)
-            self._peel()
-        # 3. Materialize a chunk-indexed GEPP for the multi-version layer.
+        # Peeling, then inactivation decoding on the residual system (BPDecoder).
+        super().solve(partial=partial)
+        # Materialize a chunk-indexed GEPP for the multi-version layer.
         self._finalize_gepp()
         if self.use_headerchunk and self.headerChunk is None:
             self.decodeHeader()
